@@ -15,6 +15,9 @@ const receivedFileData = ref({
   type: 'application/octet-stream'
 });
 
+const availablePeers = ref([]); // Store active peer IDs from signaling server
+const selectedRecipientPeerIds = ref([]); // Selected peer IDs for sending
+
 let peer = null;
 let socket = null;
 
@@ -24,60 +27,92 @@ onMounted(() => {
   const SIGNALING_HOST = import.meta.env.VITE_SIGNALING_HOST || window.location.origin;
 
 
-  // 1. Connect to our signaling server
   socket = io(SIGNALING_HOST);
 
   socket.on('connect', () => {
    statusMessage.value = `Connecting to ${SIGNALING_HOST}...`;
    
-    // 2. Initialize PeerJS
-    // Pass an empty string to let the PeerServer generate an ID for us.
     peer = new Peer('', {
       host: PEER_HOST, 
       port: 9000,
       path: '/', // Default path for peerjs-server Docker image
-      secure: false //not using TLS 
+      secure: false //not using TLS
     });
 
-    // 3. On successful connection to PeerServer
+    // Listen for updates to the list of active peers
+    socket.on('active-peers-update', (peerIds) => {
+      // Filter out our own peer ID from the list
+      availablePeers.value = peerIds.filter(id => id !== myPeerId.value);
+      console.log('Active peers updated:', availablePeers.value);
+    });
+
+    //successful conneciton
     peer.on('open', (id) => {
       myPeerId.value = id;
       statusMessage.value = `Your Peer ID is: ${id}`;
       // Register our new PeerJS ID with the signaling server
       socket.emit('register-peer', id);
+      // Request the initial list of active peers
+      socket.emit('get-active-peers');
     });
 
-    // 4. Listen for incoming data connections
-    peer.on('connection', (conn) => {
-      statusMessage.value = `Incoming connection from ${conn.peer}`;
+   // 4. Listen for incoming data connections
+peer.on('connection', (conn) => {
+  statusMessage.value = `Incoming connection from ${conn.peer}`;
+  
+  const fileChunks = [];
+  let fileMetadata = {};
+
+  conn.on('open', () => {
+    console.log(`Data connection with ${conn.peer} established successfully.`);
+    // Send ready signal to sender
+    conn.send({ type: 'ready' });
+    statusMessage.value = `Ready to receive from ${conn.peer}`;
+  });
+
+  conn.on('data', (data) => {
+    // Ignore the ready acknowledgment from sender
+    if (data.type === 'ready-ack') {
+      console.log('Sender acknowledged ready state');
+      return;
+    }
+
+    // The first piece of data should be metadata
+    if (data.type === 'metadata') {
+      fileMetadata = { name: data.name, type: data.type, size: data.size };
+      statusMessage.value = `Receiving file: ${fileMetadata.name} (${fileMetadata.size} bytes)`;
+    } else {
+      // Subsequent data are file chunks
+      fileChunks.push(data);
+      const receivedSize = fileChunks.reduce((acc, chunk) => acc + chunk.byteLength, 0);
       
-      const fileChunks = [];
-      let fileMetadata = {};
+      if (fileMetadata.size !== undefined) {
+         const percentage = fileMetadata.size === 0 ? 100 : Math.round((receivedSize / fileMetadata.size) * 100);
+         statusMessage.value = `Receiving file: ${fileMetadata.name}... ${percentage}%`;
+      }
 
-      conn.on('data', (data) => {
-        // The first piece of data should be metadata
-        if (data.type === 'metadata') {
-          fileMetadata = { name: data.name, type: data.type, size: data.size };
-          statusMessage.value = `Receiving file: ${fileMetadata.name} (${fileMetadata.size} bytes)`;
-        } else {
-          // Subsequent data are file chunks
-          fileChunks.push(data);
-          const receivedSize = fileChunks.reduce((acc, chunk) => acc + chunk.byteLength, 0);
-          statusMessage.value = `Receiving file: ${fileMetadata.name}... ${Math.round((receivedSize / fileMetadata.size) * 100)}%`;
+      // When all chunks are received
+      if (fileMetadata.size !== undefined && receivedSize === fileMetadata.size) {
+        const fileBlob = new Blob(fileChunks, { type: fileMetadata.type });
+        receivedFileData.value = {
+          blob: URL.createObjectURL(fileBlob),
+          name: fileMetadata.name,
+          type: fileMetadata.type
+        };
+        statusMessage.value = `File received successfully: ${fileMetadata.name}`;
+      }
+    }
+  });
 
-          // When all chunks are received
-          if (receivedSize === fileMetadata.size) {
-            const fileBlob = new Blob(fileChunks, { type: fileMetadata.type });
-            receivedFileData.value = {
-              blob: URL.createObjectURL(fileBlob),
-              name: fileMetadata.name,
-              type: fileMetadata.type
-            };
-            statusMessage.value = `File received successfully: ${fileMetadata.name}`;
-          }
-        }
-      });
-    });
+  conn.on('close', () => {
+      console.log(`Data connection with ${conn.peer} closed.`);
+  });
+
+  conn.on('error', (err) => {
+      console.error(`Data connection error with ${conn.peer}:`, err);
+      statusMessage.value = `Data connection error with ${conn.peer}: ${err.message || err}`;
+  });
+}); 
 
     // Handle errors
     peer.on('error', (err) => {
@@ -92,66 +127,107 @@ function handleFileSelect(event) {
   fileToSend.value = event.target.files[0];
 }
 
+function scanForPeers() {
+  socket.emit('get-active-peers');
+}
+
 function sendFile() {
   if (!fileToSend.value) {
     alert('Please select a file first.');
     return;
   }
-  if (!recipientPeerId.value) {
-    alert('Please enter a recipient Peer ID.');
+  if (selectedRecipientPeerIds.value.length === 0) {
+    alert('Please select at least one recipient.');
     return;
   }
 
-  statusMessage.value = `Connecting to peer: ${recipientPeerId.value}...`;
-  
-  // 1. Connect to the recipient's peer ID
-  const conn = peer.connect(recipientPeerId.value);
-
-  conn.on('open', () => {
-    statusMessage.value = `Connection established. Sending file: ${fileToSend.value.name}`;
-
-    // 2. Send file metadata first
-    conn.send({
-      type: 'metadata',
-      name: fileToSend.value.name,
-      type: fileToSend.value.type,
-      size: fileToSend.value.size
+  selectedRecipientPeerIds.value.forEach(recipientId => {
+    statusMessage.value = `Connecting to peer: ${recipientId}...`;
+    
+    const conn = peer.connect(recipientId, {
+      reliable: true
     });
 
-    // 3. Chunk and send the file data
-    const chunkSize = 64 * 1024; // 64KB chunks
-    let offset = 0;
-    const reader = new FileReader();
+    let isReady = false;
 
-    reader.onload = (event) => {
+    conn.on('open', () => {
+      statusMessage.value = `Connection established with ${recipientId}. Waiting for receiver...`;
+    });
+
+    conn.on('data', (data) => {
+      // Wait for ready signal from receiver
+      if (data.type === 'ready' && !isReady) {
+        isReady = true;
+        statusMessage.value = `Receiver ready. Sending file: ${fileToSend.value.name}`;
+        
+        // Acknowledge ready state
+        conn.send({ type: 'ready-ack' });
+
+        // Now start sending the file
+        startFileTransfer(conn, recipientId);
+      }
+    });
+    
+    conn.on('error', (err) => {
+      statusMessage.value = `Connection Error with ${recipientId}: ${err}`;
+      console.error('Connection Error:', err, recipientId);
+    });
+
+    conn.on('close', () => {
+      console.log(`Connection closed with ${recipientId}`);
+    });
+  });
+}
+
+// Separate function to handle file transfer
+function startFileTransfer(conn, recipientId) {
+  // Send file metadata first
+  conn.send({
+    type: 'metadata',
+    name: fileToSend.value.name,
+    type: fileToSend.value.type,
+    size: fileToSend.value.size
+  });
+
+  // Chunk and send the file data
+  const chunkSize = 64 * 1024; // 64KB chunks
+  let offset = 0;
+  const reader = new FileReader();
+
+  reader.onload = (event) => {
+    if (conn.open) {
       conn.send(event.target.result);
       offset += event.target.result.byteLength;
+
+      const progress = Math.round((offset / fileToSend.value.size) * 100);
+      statusMessage.value = `Sending to ${recipientId}: ${progress}%`;
 
       if (offset < fileToSend.value.size) {
         readSlice(offset);
       } else {
-        statusMessage.value = `File sent successfully!`;
+        statusMessage.value = `File sent successfully to ${recipientId}!`;
       }
-    };
-    
-    reader.onerror = (err) => console.error('FileReader Error:', err);
-
-    function readSlice(o) {
-      const slice = fileToSend.value.slice(o, o + chunkSize);
-      reader.readAsArrayBuffer(slice);
+    } else {
+      console.error('Connection closed during transfer');
+      statusMessage.value = `Connection lost with ${recipientId}`;
     }
-
-    // Start the reading process
-    readSlice(0);
-  });
+  };
   
-  conn.on('error', (err) => {
-    statusMessage.value = `Connection Error: ${err}`;
-    console.error('Connection Error:', err);
-  });
-}
-</script>
+  reader.onerror = (err) => {
+    console.error('FileReader Error:', err);
+    statusMessage.value = `Error reading file: ${err}`;
+  };
 
+  function readSlice(o) {
+    const slice = fileToSend.value.slice(o, o + chunkSize);
+    reader.readAsArrayBuffer(slice);
+  }
+
+  // Start the reading process
+  readSlice(0);
+}
+
+</script>
 
 
 <template>
@@ -168,14 +244,23 @@ function sendFile() {
     <div class="card">
       <h2>Send a File</h2>
       <div class="form-group">
-        <label for="recipient-id">Recipient's Peer ID:</label>
-        <input type="text" id="recipient-id" v-model="recipientPeerId" placeholder="Enter recipient ID">
-      </div>
-      <div class="form-group">
         <label for="file-input">Select File:</label>
         <input type="file" id="file-input" @change="handleFileSelect">
       </div>
-      <button @click="sendFile">Send File</button>
+
+      <div class="form-group">
+        <h3>Available Peers</h3>
+        <button @click="scanForPeers">Scan for Peers</button>
+        <div v-if="availablePeers.length > 0" class="peer-list">
+          <div v-for="peerId in availablePeers" :key="peerId" class="peer-item">
+            <input type="checkbox" :id="peerId" :value="peerId" v-model="selectedRecipientPeerIds">
+            <label :for="peerId">{{ peerId }}</label>
+          </div>
+        </div>
+        <p v-else>No other peers available. Click 'Scan for Peers' to refresh.</p>
+      </div>
+      
+      <button @click="sendFile" :disabled="!fileToSend || selectedRecipientPeerIds.length === 0">Send File</button>
     </div>
 
     <div v-if="receivedFileData.blob" class="card received-file">
