@@ -1,17 +1,30 @@
-// server.js
 import { Server } from "socket.io";
+import express from 'express';
+import { createServer } from 'http';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-// We'll use a simple object to store users and their PeerJS IDs
-const users = {};
+// --- Setup ---
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// Create a new Socket.IO server running on port 3000
-const io = new Server(3000, {
+const app = express();
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
   cors: {
-    origin: "*", // Allow connections from any origin (for development)
+    origin: "*", // Allow connections from any origin
   },
 });
 
-console.log("Signaling server running on port 3000");
+const PORT = 3000;
+
+// --- Static File Serving ---
+// Serve the built Vue.js application from the 'dist' directory
+app.use(express.static(path.join(__dirname, 'dist')));
+
+
+// --- Signaling Logic ---
+const users = {};
 
 io.on("connection", (socket) => {
   console.log(`User connected: ${socket.id}`);
@@ -20,8 +33,6 @@ io.on("connection", (socket) => {
   socket.on("register-peer", (peerId) => {
     console.log(`Registering peer_id ${peerId} for user ${socket.id}`);
     users[socket.id] = peerId;
-    
-    // Optional: You could broadcast the updated user list to all clients here
   });
 
   // Event: User disconnects
@@ -29,4 +40,10 @@ io.on("connection", (socket) => {
     console.log(`User disconnected: ${socket.id}`);
     delete users[socket.id];
   });
+});
+
+// --- Server Activation ---
+httpServer.listen(PORT, () => {
+  console.log(`Server is listening on port ${PORT}`);
+  console.log(`Access your app at http://localhost:${PORT}`);
 });

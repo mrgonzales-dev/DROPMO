@@ -20,18 +20,23 @@ let socket = null;
 
 // --- Lifecycle Hook ---
 onMounted(() => {
+  const PEER_HOST = import.meta.env.VITE_PEER_HOST || window.location.hostname;
+  const SIGNALING_HOST = import.meta.env.VITE_SIGNALING_HOST || window.location.origin;
+
+
   // 1. Connect to our signaling server
-  socket = io('http://localhost:3000');
+  socket = io(SIGNALING_HOST);
 
   socket.on('connect', () => {
-    statusMessage.value = 'Connected to signaling server.';
-    
+   statusMessage.value = `Connecting to ${SIGNALING_HOST}...`;
+   
     // 2. Initialize PeerJS
     // Pass an empty string to let the PeerServer generate an ID for us.
     peer = new Peer('', {
-      host: 'localhost',
+      host: PEER_HOST, 
       port: 9000,
-      path: '/'
+      path: '/', // Default path for peerjs-server Docker image
+      secure: false //not using TLS 
     });
 
     // 3. On successful connection to PeerServer
@@ -146,6 +151,8 @@ function sendFile() {
   });
 }
 </script>
+
+
 
 <template>
   <div id="app-container">

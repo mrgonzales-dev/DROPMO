@@ -1,0 +1,22 @@
+services:
+  # This is your application: Vue frontend + Signaling Server
+  app:
+    build: .
+    ports:
+      # Maps port 3000 inside the container to port 3000 on your machine
+      - "3000:3000"
+    networks:
+      - dropmo-net
+
+  # This is the PeerJS server
+  peerjs:
+    image: peerjs/peerjs-server
+    ports:
+      # Maps port 9000 inside the container to port 9000 on your machine
+      - "9000:9000"
+    networks:
+      - dropmo-net
+
+networks:
+  dropmo-net:
+    driver: bridge

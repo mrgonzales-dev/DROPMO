@@ -10,6 +10,7 @@
     "peerjs": "peerjs --port 9000"
   },
   "dependencies": {
+    "express": "^5.2.1",
     "node": "^25.6.0",
     "peerjs": "^1.5.5",
     "pinia": "^3.0.4",
