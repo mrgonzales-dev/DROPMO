@@ -17,6 +17,7 @@ const receivedFileData = ref({
 
 const availablePeers = ref([]); // Store active peer IDs from signaling server
 const selectedRecipientPeerIds = ref([]); // Selected peer IDs for sending
+const showReceivedFileModal = ref(false); // Controls visibility of the received file modal
 
 let peer = null;
 let socket = null;
@@ -63,43 +64,62 @@ peer.on('connection', (conn) => {
   const fileChunks = [];
   let fileMetadata = {};
 
-  conn.on('open', () => {
+  // Function to send ready signal
+  const sendReadySignal = () => {
     console.log(`Data connection with ${conn.peer} established successfully.`);
-    // Send ready signal to sender
+    console.log(`[Receiver] Sending 'ready' signal to ${conn.peer}`);
     conn.send({ type: 'ready' });
     statusMessage.value = `Ready to receive from ${conn.peer}`;
-  });
+  };
+
+  // Check if connection is already open (race condition fix)
+  if (conn.open) {
+    sendReadySignal();
+  } else {
+    conn.on('open', sendReadySignal);
+  }
 
   conn.on('data', (data) => {
-    // Ignore the ready acknowledgment from sender
-    if (data.type === 'ready-ack') {
-      console.log('Sender acknowledged ready state');
-      return;
-    }
+    console.log('[Receiver] Received data type:', typeof data, 'isArrayBuffer:', data instanceof ArrayBuffer);
+    
+    // Check if this is a control message (has a 'type' property and it's an object)
+    if (data && typeof data === 'object' && data.type && !(data instanceof ArrayBuffer)) {
+      // Ignore the ready acknowledgment from sender
+      if (data.type === 'ready-ack') {
+        console.log('[Receiver] Sender acknowledged ready state.');
+        return;
+      }
 
-    // The first piece of data should be metadata
-    if (data.type === 'metadata') {
-      fileMetadata = { name: data.name, type: data.type, size: data.size };
-      statusMessage.value = `Receiving file: ${fileMetadata.name} (${fileMetadata.size} bytes)`;
+      // The first piece of data should be metadata
+      if (data.type === 'metadata') {
+        console.log(`[Receiver] Received metadata from ${conn.peer}:`, data.name, data.size, data.mimeType);
+        fileMetadata = { name: data.name, mimeType: data.mimeType, size: data.size };
+        statusMessage.value = `Receiving file: ${fileMetadata.name} (${fileMetadata.size} bytes)`;
+      }
     } else {
-      // Subsequent data are file chunks
+      // Everything else is a file chunk
+      console.log(`[Receiver] Received chunk of size: ${data.byteLength}`);
       fileChunks.push(data);
       const receivedSize = fileChunks.reduce((acc, chunk) => acc + chunk.byteLength, 0);
       
       if (fileMetadata.size !== undefined) {
          const percentage = fileMetadata.size === 0 ? 100 : Math.round((receivedSize / fileMetadata.size) * 100);
          statusMessage.value = `Receiving file: ${fileMetadata.name}... ${percentage}%`;
+         console.log(`[Receiver] Progress: ${percentage}% (${receivedSize}/${fileMetadata.size} bytes)`);
       }
 
       // When all chunks are received
-      if (fileMetadata.size !== undefined && receivedSize === fileMetadata.size) {
-        const fileBlob = new Blob(fileChunks, { type: fileMetadata.type });
+      if (fileMetadata.size !== undefined && receivedSize >= fileMetadata.size) {
+        console.log('[Receiver] All chunks received, creating blob...');
+        const fileBlob = new Blob(fileChunks, { type: fileMetadata.mimeType || 'application/octet-stream' });
         receivedFileData.value = {
           blob: URL.createObjectURL(fileBlob),
           name: fileMetadata.name,
-          type: fileMetadata.type
+          type: fileMetadata.mimeType || 'application/octet-stream'
         };
         statusMessage.value = `File received successfully: ${fileMetadata.name}`;
+        showReceivedFileModal.value = true;
+        console.log('[Receiver] Modal should now be visible');
       }
     }
   });
@@ -123,6 +143,15 @@ peer.on('connection', (conn) => {
 });
 
 // --- Methods ---
+function closeReceivedFileModal() {
+  receivedFileData.value = {
+    blob: null,
+    name: 'file',
+    type: 'application/octet-stream'
+  };
+  showReceivedFileModal.value = false;
+}
+
 function handleFileSelect(event) {
   fileToSend.value = event.target.files[0];
 }
@@ -143,6 +172,7 @@ function sendFile() {
 
   selectedRecipientPeerIds.value.forEach(recipientId => {
     statusMessage.value = `Connecting to peer: ${recipientId}...`;
+    console.log(`[Sender] Attempting to connect to peer: ${recipientId}`);
     
     const conn = peer.connect(recipientId, {
       reliable: true
@@ -152,6 +182,7 @@ function sendFile() {
 
     conn.on('open', () => {
       statusMessage.value = `Connection established with ${recipientId}. Waiting for receiver...`;
+      console.log(`[Sender] Connection with ${recipientId} opened. Waiting for 'ready' signal from receiver.`);
     });
 
     conn.on('data', (data) => {
@@ -159,6 +190,7 @@ function sendFile() {
       if (data.type === 'ready' && !isReady) {
         isReady = true;
         statusMessage.value = `Receiver ready. Sending file: ${fileToSend.value.name}`;
+        console.log(`[Sender] Received 'ready' signal from ${recipientId}. Sending 'ready-ack'.`);
         
         // Acknowledge ready state
         conn.send({ type: 'ready-ack' });
@@ -181,11 +213,13 @@ function sendFile() {
 
 // Separate function to handle file transfer
 function startFileTransfer(conn, recipientId) {
+  console.log('[Sender] Starting file transfer:', fileToSend.value.name, fileToSend.value.size, 'bytes');
+  
   // Send file metadata first
   conn.send({
     type: 'metadata',
     name: fileToSend.value.name,
-    type: fileToSend.value.type,
+    mimeType: fileToSend.value.type,
     size: fileToSend.value.size
   });
 
@@ -201,11 +235,13 @@ function startFileTransfer(conn, recipientId) {
 
       const progress = Math.round((offset / fileToSend.value.size) * 100);
       statusMessage.value = `Sending to ${recipientId}: ${progress}%`;
+      console.log(`[Sender] Sent chunk: ${progress}% (${offset}/${fileToSend.value.size})`);
 
       if (offset < fileToSend.value.size) {
         readSlice(offset);
       } else {
         statusMessage.value = `File sent successfully to ${recipientId}!`;
+        console.log('[Sender] File transfer complete!');
       }
     } else {
       console.error('Connection closed during transfer');
@@ -263,14 +299,20 @@ function startFileTransfer(conn, recipientId) {
       <button @click="sendFile" :disabled="!fileToSend || selectedRecipientPeerIds.length === 0">Send File</button>
     </div>
 
-    <div v-if="receivedFileData.blob" class="card received-file">
-      <h2>File Received!</h2>
-      <p>
-        You have received: <strong>{{ receivedFileData.name }}</strong>
-      </p>
-      <a :href="receivedFileData.blob" :download="receivedFileData.name" class="download-link">
-        Download File
-      </a>
+
+
+    <!-- Received File Modal -->
+    <div v-if="showReceivedFileModal" class="modal-overlay">
+      <div class="modal-content">
+        <h2>File Received!</h2>
+        <p>
+          You have received: <strong>{{ receivedFileData.name }}</strong>
+        </p>
+        <a :href="receivedFileData.blob" :download="receivedFileData.name" class="download-link" @click="closeReceivedFileModal">
+          Download File
+        </a>
+        <button @click="closeReceivedFileModal" class="modal-close-button">Close</button>
+      </div>
     </div>
   </div>
 </template>
@@ -332,6 +374,42 @@ button {
 button:hover {
   background-color: #3535dd;
 }
+button:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+}
+.peer-list {
+  margin-top: 1rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 1rem;
+  background-color: white;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.peer-item {
+  display: flex;
+  align-items: center;
+  padding: 0.5rem;
+  margin-bottom: 0.5rem;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+}
+.peer-item:hover {
+  background-color: #f0f0f0;
+}
+.peer-item input[type="checkbox"] {
+  width: auto;
+  margin-right: 0.5rem;
+  cursor: pointer;
+}
+.peer-item label {
+  margin: 0;
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 0.9em;
+  word-break: break-all;
+}
 .received-file {
   background-color: #e6ffed;
   border-left-color: #00c853;
@@ -348,4 +426,42 @@ button:hover {
 .download-link:hover {
   background-color: #009624;
 }
+
+/* Modal Styles */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: white;
+  padding: 2rem;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  text-align: center;
+  position: relative;
+  max-width: 90%;
+  max-height: 90%;
+  overflow: auto;
+}
+
+.modal-close-button {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: #666;
+}
+
 </style>
