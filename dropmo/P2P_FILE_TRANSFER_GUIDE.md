@@ -1,3 +1,95 @@
+# P2P File Transfer Walkthrough with Vue, PeerJS, and Socket.IO
+
+This guide will walk you through creating a simple web application that allows two users to send files directly to each other using PeerJS for the P2P connection and Socket.IO for signaling.
+
+## 1. Project Goal
+
+We will build a single-page application where:
+*   Each user is assigned a unique ID upon visiting the page.
+*   A user can see their own ID.
+*   A user can enter another user's ID, select a file, and send it.
+*   The receiving user gets a notification and a download link for the file.
+
+---
+
+## 2. Server-Side: The Signaling Server
+
+PeerJS needs a "signaling" server to help peers find each other. Socket.IO is perfect for this. We'll create a minimal server that keeps track of which users are online.
+
+**This server does NOT handle the file transfer.** It only introduces Peer A to Peer B.
+
+**Step 2.1: Create `server.js`**
+
+In the root of your project, create a new file called `server.js`.
+
+```javascript
+// server.js
+import { Server } from "socket.io";
+
+// We'll use a simple object to store users and their PeerJS IDs
+const users = {};
+
+// Create a new Socket.IO server running on port 3000
+const io = new Server(3000, {
+  cors: {
+    origin: "*", // Allow connections from any origin (for development)
+  },
+});
+
+console.log("Signaling server running on port 3000");
+
+io.on("connection", (socket) => {
+  console.log(`User connected: ${socket.id}`);
+
+  // Event: A new user registers their PeerJS ID
+  socket.on("register-peer", (peerId) => {
+    console.log(`Registering peer_id ${peerId} for user ${socket.id}`);
+    users[socket.id] = peerId;
+    
+    // Optional: You could broadcast the updated user list to all clients here
+  });
+
+  // Event: User disconnects
+  socket.on("disconnect", () => {
+    console.log(`User disconnected: ${socket.id}`);
+    delete users[socket.id];
+  });
+});
+```
+
+**Step 2.2: Add Server Dependencies**
+
+You'll need `socket.io`. You already installed this, but if you were starting fresh, you'd run:
+```bash
+npm install socket.io
+```
+
+**Step 2.3: Run the Signaling Server**
+
+You will need to run this script in a separate terminal from your Vue development server.
+```bash
+node server.js
+```
+Now you have a signaling server ready and waiting for clients to connect.
+
+---
+
+## 3. Client-Side: The Vue.js App
+
+Now we will modify your Vue application to handle the user interface and the file transfer logic.
+
+**Step 3.1: Install Dependencies (if you haven't)**
+
+Ensure `peerjs` and `socket.io-client` are in your `package.json`.
+```bash
+npm install peerjs socket.io-client
+```
+
+**Step 3.2: Modify `App.vue`**
+
+Replace the content of `src/App.vue` with the following. This component contains all the logic for our simple app.
+
+```vue
 <script setup>
 import { ref, onMounted } from 'vue';
 import { Peer } from 'peerjs';
@@ -29,9 +121,9 @@ onMounted(() => {
     // 2. Initialize PeerJS
     // Pass an empty string to let the PeerServer generate an ID for us.
     peer = new Peer('', {
-      host: 'localhost',
+      host: 'localhost', // Use the default PeerJS server for simplicity
       port: 9000,
-      path: '/'
+      path: '/myapp'
     });
 
     // 3. On successful connection to PeerServer
@@ -257,3 +349,35 @@ button:hover {
   background-color: #009624;
 }
 </style>
+```
+
+---
+
+## 4. How to Run It
+
+1.  **Run the PeerJS Server**: The easiest way is to use the npx command, which will download and run the PeerJS server. It needs to be on a different port from your signaling server and Vue app.
+    ```bash
+    # In a new terminal
+    npx peerjs --port 9000 --path /myapp
+    ```
+
+2.  **Run the Signaling Server**:
+    ```bash
+    # In another terminal
+    node server.js
+    ```
+
+3.  **Run the Vue App**:
+    ```bash
+    # In your main project terminal
+    npm run dev
+    ```
+
+4.  **Test the Transfer**:
+    *   Open your Vue app in two different browser tabs (or different browsers).
+    *   Each tab will get a unique Peer ID.
+    *   In Tab 1, copy the Peer ID from Tab 2 into the "Recipient's Peer ID" field.
+    *   In Tab 1, select a file and click "Send File".
+    *   You will see status messages appear, and a "File Received!" card with a download link should appear in Tab 2.
+
+This setup provides a complete, albeit simple, foundation for a P2P file transfer application. You can build on this by adding features like a user list, multi-file transfers, or error handling.
